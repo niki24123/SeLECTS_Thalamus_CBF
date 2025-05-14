@@ -1,0 +1,433 @@
+---
+title: "SeLECTS_Thalamus_CBF_rmd"
+author: "Niki Iasinovschi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This is a retrospective chart review study comparing thalamic blood flow in children with Self-Limited Epilepsy with Centrotemporal Spikes versus clinical controls.
+
+Packages
+```{r packages}
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(patchwork)
+```
+
+
+### Data
+Data was collected and stored in selects_thalamuscbf_long.csv  
+
+* subj  
+  * 1-79: randomized identification number  
+* group  
+  * SeLECTS  
+  * Control  
+* ageMRI  
+  * age at the time of MRI  
+* sex  
+  * 0: female  
+  * 1: male  
+* sedation  
+  * 0: no sedation used at the time of MRI  
+  * 1: sedation used at the time of MRI  
+* sedationDose  
+  * description of type of sedation used during MRI  
+* meds  
+  * 0: no anti-seizure medication at time of MRI, or controls  
+  * 1: anti-seizure medication at time of MRI  
+* medDose  
+  * description of anti-seizure medication at time of MRI  
+  * none: no anti-seizure medication at time of MRI, or controls  
+  * NA: controls  
+* lifetimeSeizures  
+  * number of lifetime seizures reported prior to MRI  
+  * NA: controls  
+* LSpikes  
+  * 0: no spike-wave activity on EEG in left hemisphere  
+  * 1: spike-wave activity on EEG in left hemisphere  
+  * NA: controls  
+* RSpikes	  
+  * 0: no spike-wave activity on EEG in right hemisphere  
+  * 1: spike-wave activity on EEG in right hemisphere  
+  * NA: controls   
+* BilatSpikes  
+  * 0: no spike-wave activity on EEG in bilateral hemispheres  
+  * 1: spike-wave activity on EEG in bilateral hemispheres  
+  * NA: controls  
+* tesla  
+  * tesla at which scan was obtained (all 3T)  
+* isLeft  
+  * 0: data point from right thalamus  
+  * 1: data point from left thalamus  
+  * every subj has one left and one right CBF value  
+* isIpsi  
+  * 0: spike-wave activity not present in the hemisphere ipsilateral to CBF value  
+  * 1: spike-wave activity present in the hemisphere ipsilateral to CBF value  
+* ageMedStart  
+  * age at which ASM were first taken  
+  * 0: controls
+* agefirstSeiz  
+  * age of first reported seizure  
+  * 0: controls
+* yearsOnMeds  
+  * ageMRI - ageMedStart
+  
+* yearsFromFirstSeiz
+  * ageMRI - agefirstSeiz
+* CBF
+  * CBF value of thalamus
+  
+Import data
+```{r data_import}
+data_long<- read.csv("data/selects_thalamuscbf_long.csv")
+factor_cols<- c("subj","group", "sex", "sedation", "meds", "LSpikes", "RSpikes", "BilatSpikes", "tesla", 
+                "isLeft", "isIpsi")
+data_long[factor_cols] <- lapply(data_long[factor_cols], factor)
+rm(factor_cols)
+```
+
+
+### Demographics
+
+Number of subjects, age, sex, medication use, sedation (Table 1)
+```{r demographics}
+demographics_data_selects <- data_long %>% filter (isLeft == 1 & group == "SeLECTS")
+demographics_data_control <- data_long %>% filter (isLeft == 1 & group == "Control")
+
+cat("Number of Children with SeLECTS:", length(demographics_data_selects$group))
+cat("Number of Controls:", length(demographics_data_control$group))
+    
+cat("SeLECTS mean age:", mean(demographics_data_selects$ageMRI))
+cat("Controls mean age:", mean(demographics_data_control$ageMRI))
+ttest_age <- t.test(demographics_data_selects$ageMRI, demographics_data_control$ageMRI)
+cat("t-test mean age SeLECTS vs. Controls\np-value", 
+    ttest_age$p.value)
+
+cat("SeLECTS males:", sum(demographics_data_selects$sex == "1"))
+cat("Control males:", sum(demographics_data_control$sex == "1"))
+chisq_sex_matrix <- matrix(c(sum(demographics_data_selects$sex == "1"), 
+                                sum(demographics_data_selects$sex == "0"),
+                                sum(demographics_data_control$sex == "1"),
+                                sum(demographics_data_control$sex == "0")),
+                                nrow = 2)
+cat("Chi-square test sex p-value:", chisq.test(chisq_sex_matrix, correct = FALSE)$p.value)
+
+cat("SeLECTS scanned with sedation:", sum(demographics_data_selects$sedation == "1"))
+cat("Control scanned with sedation:", sum(demographics_data_control$sedation == "1"))
+chisq_sed_matrix <- matrix(c(sum(demographics_data_selects$sedation == "1"), 
+                                sum(demographics_data_selects$sedation == "0"),
+                                sum(demographics_data_control$sedation == "1"),
+                                sum(demographics_data_control$sedation == "0")),
+                                nrow = 2)
+cat("Chi-square test sedation p-value:", chisq.test(chisq_sed_matrix, correct = FALSE)$p.value)
+
+cat("SeLECTS on ASM:", sum(demographics_data_selects$meds == "1"))
+
+cat("SeLECTS bilateral spikes:", sum(demographics_data_selects$BilatSpikes == "1"))
+cat("SeLECTS unilateral spikes:", 
+    length(demographics_data_selects$group) - sum(demographics_data_selects$BilatSpikes == "1"))
+
+cat("Average time to MRI after first seizure:", mean(demographics_data_selects$yearsFromFirstSeiz), 
+    "+-", sd(demographics_data_selects$yearsFromFirstSeiz))
+
+cat("Average use of meds before seizure:", mean((demographics_data_selects %>% filter(meds == 1))$yearsOnMeds), 
+    "+-", sd((demographics_data_selects %>% filter(meds == 1))$yearsOnMeds))
+#rm(demographics_data_selects, demographics_data_control, ttest_age, chisq_sex_matrix, chisq_sed_matrix)
+```
+
+
+### Thalamic CBF
+
+#### Primary analysis of thalamic blood flow.
+Here we use linear mixed models to account for the repeated measurements of left and right within each subject. We adjust for age, sex, and sedation use. We also look at the interaction of sex and sedation with group.
+
+unadjusted means +- sd control and SeLECTS
+```{r unadj_means}
+#SeLECTS
+mean((data_long %>% filter (group == "SeLECTS"))$CBF)
+sd((data_long %>% filter (group == "SeLECTS"))$CBF)
+
+#Control
+mean((data_long %>% filter (group == "Control"))$CBF)
+sd((data_long %>% filter (group == "Control"))$CBF)
+```
+
+
+```{r model_analysis}
+model_analysis <- function(model) {
+  print(summary(model))
+  print(confint(model))
+}
+```
+
+Linear mixed models (Table 2)
+```{r primary_models}
+# model 1: group
+model_1 <-lmer(CBF ~ group + (1 | subj), data = data_long)
+model_analysis(model_1)
+
+# model 2: group, age
+model_2 <-lmer(CBF ~ group + ageMRI + (1 | subj), data = data_long)
+model_analysis(model_2)
+
+# model 2a: group, age, group *age
+model_2a <-lmer(CBF ~ group + ageMRI + group * ageMRI + (1 | subj), data = data_long)
+model_analysis(model_2a)
+
+# model 3: group, sex
+model_3 <-lmer(CBF ~ group + sex + (1 | subj), data = data_long)
+model_analysis(model_3)
+
+# model 3a: group, sex, group * sex
+model_3a <-lmer(CBF ~ group + sex + group * sex + (1 | subj), data = data_long)
+model_analysis(model_3a)
+
+# model 4: group, age, sex
+model_4 <-lmer(CBF ~ group + ageMRI + sex + (1 | subj), data = data_long)
+model_analysis(model_4)
+
+# model 5: group, age, sex, sedation
+model_5 <-lmer(CBF ~ group + ageMRI + sex + sedation + (1 | subj), data = data_long)
+model_analysis(model_5)
+
+# model 5a: group, age, sex, sedation, group * sedation
+model_5a <-lmer(CBF ~ group + ageMRI + sex + sedation + group * sedation + (1 | subj), data = data_long)
+model_analysis(model_5a)
+```
+
+Estimated marginal means analysis for model 1 (SeLECTS v control unadjusted)
+```{r emm_model_1}
+# Getting EMM of SeLECTS and controls from model 1 (unadjusted for covariates)
+model_1 <-lmer(CBF ~ group + (1 | subj), data = data_long)
+model_1_emm <- ls_means(model_1)
+View(model_1_emm)
+#pairwise to get p-value comparing SeLECTS vs control
+model_1_emm_pair <- ls_means(model_1, pairwise = TRUE)
+View(model_1_emm_pair)
+```
+
+Estimated marginal means analysis for model 4
+```{r emm_model_4}
+# Getting EMM of SeLECTS and controls from model 4
+model_4 <-lmer(CBF ~ group + ageMRI + sex + (1 | subj), data = data_long)
+model_4_emm <- ls_means(model_4)
+View(model_4_emm)
+#pairwise to get p-value comparing SeLECTS vs control
+model_4_emm_pair <- ls_means(model_4, pairwise = TRUE)
+View(model_4_emm_pair)
+```
+
+Estimated marginal means analysis for model 5a 
+```{r emm_model_5a}
+# Getting EMM of SeLECTS and controls from model 5a
+model_5a <-lmer(CBF ~ group + ageMRI + sex + sedation + group * sedation + (1 | subj), data = data_long)
+model_5a_emm <- ls_means(model_5a)
+View(model_5a_emm)
+#pairwise to get p-value comparing SeLECTS vs control, subdivided by sedated vs unsedated
+model_5a_emm_pair <- ls_means(model_5a, pairwise = TRUE)
+View(model_5a_emm_pair)
+```
+
+
+##### Figure 2 (model 4 and model 5a)
+
+Figure 2a
+```{r fig_2a}
+#making dataframe for plot 2a
+model_4 <-lmer(CBF ~ group + ageMRI + sex + (1 | subj), data = data_long)
+model_4_emm <- ls_means(model_4)
+#extracting necessary rows
+model_4_emm_fig <- model_4_emm[rownames(model_4_emm) %in% c("groupControl","groupSeLECTS"), ]  
+row.names(model_4_emm_fig) <- c("Control", "SeLECTS")
+
+#plot 2a
+a <-ggplot(data = model_4_emm_fig, mapping = aes(x = rownames(model_4_emm_fig))) +
+  geom_point(mapping = aes(y = Estimate, size = 1, color = rownames(model_4_emm_fig)), show.legend = FALSE) +
+  geom_linerange(mapping = aes(ymin=lower, ymax=upper, color =rownames(model_4_emm_fig)), show.legend = FALSE) +
+  labs(y = "Average CBF\n(mL blood / 100 g tissue min)", x = "Group") +
+  theme_classic() +
+  scale_y_continuous(limits=c(30,60), n.breaks = 6)+
+  theme(axis.text.x = element_text(size = 25, color = "black"), axis.title.x = element_text(size = 25, color = "black"), axis.text.y = element_text(size = 25, color = "black"), axis.title.y = element_text(size = 25, color = "black"))
+```
+
+Figure 2b
+```{r fig_2b}
+#making dataframe for plot 2b
+model_5a <-lmer(CBF ~ group + ageMRI + sex + sedation + group * sedation + (1 | subj), data = data_long)
+model_5a_emm <- ls_means(model_5a)
+#extracting necessary rows
+model_5a_emm_fig <- model_5a_emm[(rownames(model_5a_emm) %in%
+                              c("groupControl:sedation0","groupSeLECTS:sedation0",
+                                "groupControl:sedation1","groupSeLECTS:sedation1")) , ] 
+model_5a_emm_fig$Group <- c("Control", "SeLECTS", "Control", "SeLECTS")
+model_5a_emm_fig$Sedation <- c("Sedation Not Used", "Sedation Not Used", "Sedation Used", "Sedation Used")
+model_5a_emm_fig$Group <-factor(model_5a_emm_fig$Group)
+model_5a_emm_fig$Sedation <- model_5a_emm_fig$Sedation
+
+#plot 
+b <- ggplot(model_5a_emm_fig, aes(y = Estimate, x = Sedation, color= Group)) +
+  geom_pointrange(aes(ymin = lower, ymax = upper), 
+                  position=position_dodge(0.5), 
+                  linetype='solid',
+                  fatten = 7) +
+  scale_y_continuous(limits=c(30,60), n.breaks = 6)+
+  theme_classic() +
+  labs(y = "Average CBF\n(mL blood / 100 g tissue min)") +
+  theme(axis.text.x = element_text(size = 25, color = "black"), axis.title.x = element_blank(), axis.text.y = element_text(size = 25, color = "black"), axis.title.y = element_text(size = 25, color = "black"), legend.text = element_text(size = 20, color = "black"), legend.title = element_text(, size = 20, color = "black"), legend.position = c(0.8, 0.2) ) +
+  guides(color = guide_legend(override.aes = list(size = 1)), linewidth = "none")
+```
+
+Figure 2a and 2b
+```{r fig_2}
+a + b + plot_layout(widths = c(1, 2))
+```
+
+#### Spike Laterality & Thalamic Hemisphere
+
+Left versus right thalamus. Paired t-test using controls only
+```{r thal_hemisphere}
+mean((data_long %>% filter(group == "Control" & isLeft == "1"))[["CBF"]], na.rm = TRUE) 
+sd((data_long %>% filter(group == "Control" & isLeft == "1"))[["CBF"]], na.rm = TRUE) 
+mean((data_long %>% filter(group == "Control" & isLeft == "0"))[["CBF"]], na.rm = TRUE) 
+sd((data_long %>% filter(group == "Control" & isLeft == "0"))[["CBF"]], na.rm = TRUE) 
+
+control_ttest <- t.test((data_long %>% filter (isLeft == 0 & group == "Control"))[["CBF"]], (data_long %>% filter (isLeft == 1 & group == "Control"))[["CBF"]], paired = TRUE)
+control_ttest$p.value
+```
+
+Spike Group LMM Analysis (Table 3)
+"spikegroup" variable combines "group" and "isIpsi" and "BilatSpikes"
+* spikegroup
+  * "Control"
+  * "Bilateral\nSpikes"
+  * "Unilateral\nSpikes:\nIpsilateral"
+  * "Unilateral\nSpikes:\nContralateral"
+```{r spike_type}
+#creating new df
+data_long_spikegroup <- data_long
+data_long_spikegroup$spikegroup <- data_long_spikegroup$BilatSpikes
+levels(data_long_spikegroup$spikegroup) <- c("Control", "Bilateral\nSpikes", 
+                                            "Unilateral\nSpikes:\nIpsilateral",
+                                            "Unilateral\nSpikes:\nContralateral")
+data_long_spikegroup$spikegroup[is.na(data_long_spikegroup$BilatSpikes)] <- "Control"
+data_long_spikegroup$spikegroup[(data_long_spikegroup$BilatSpikes == 0 & 
+                                  data_long_spikegroup$isIpsi == 1)] <- "Unilateral\nSpikes:\nIpsilateral"
+data_long_spikegroup$spikegroup[(data_long_spikegroup$BilatSpikes == 0 & 
+                                  data_long_spikegroup$isIpsi == 0)] <- "Unilateral\nSpikes:\nContralateral"
+data_long_spikegroup$spikegroup <- relevel(data_long_spikegroup$spikegroup, ref = "Control")
+
+#means
+##control
+mean((data_long_spikegroup %>% filter (spikegroup == "Control"))$CBF)
+sd((data_long_spikegroup %>% filter (spikegroup == "Control"))$CBF)
+##SeLECTS bilateral
+mean((data_long_spikegroup %>% filter (spikegroup == "Bilateral\nSpikes"))$CBF)
+sd((data_long_spikegroup %>% filter (spikegroup == "Bilateral\nSpikes"))$CBF)
+##SeLECTS unilateral spikes: ipsilateral
+mean((data_long_spikegroup %>% filter (spikegroup == "Unilateral\nSpikes:\nIpsilateral"))$CBF)
+sd((data_long_spikegroup %>% filter (spikegroup == "Unilateral\nSpikes:\nIpsilateral"))$CBF)
+##SeLECTS unilateral spikes: contralateral
+mean((data_long_spikegroup %>% filter (spikegroup == "Unilateral\nSpikes:\nContralateral"))$CBF)
+sd((data_long_spikegroup %>% filter (spikegroup == "Unilateral\nSpikes:\nContralateral"))$CBF)
+
+
+
+#model 7, unadjusted
+model_7 <- lmer(CBF ~  spikegroup + (1 | subj), data = data_long_spikegroup)
+model_analysis(model_7)
+
+#model 7a, adjusted for age sex sedation
+model_7a <- lmer(CBF ~  spikegroup + ageMRI + sex + sedation + (1 | subj), data = data_long_spikegroup)
+model_analysis(model_7a)
+```
+
+Figure 3b, uses model 7a
+```{r fig_3b}
+model_7a <- lmer(CBF ~  spikegroup + ageMRI + sex + sedation + (1 | subj), data = data_long_spikegroup)
+
+model_7a_ls <- ls_means(model_7a)
+model_7a_ls_pair <- ls_means(model_7a, pairwise = TRUE)
+
+model_7a_ls_mod <- model_7a_ls[(rownames(model_7a_ls) 
+                                %in% c("spikegroupControl",
+                                       "spikegroupBilateral\nSpikes",
+                                       "spikegroupUnilateral\nSpikes:\nIpsilateral",
+                                       "spikegroupUnilateral\nSpikes:\nContralateral")) , ] 
+model_7a_ls_mod$spikegroup <- c("Control",
+                                "Bilateral\nSpikes",
+                                "Unilateral\nSpikes:\nIpsilateral",
+                                "Unilateral\nSpikes:\nContralateral")
+
+model_7a_ls_mod$spikegroup <- factor(model_7a_ls_mod$spikegroup, 
+                                     levels = c("Control",
+                                                "Bilateral\nSpikes",
+                                                "Unilateral\nSpikes:\nIpsilateral",
+                                                "Unilateral\nSpikes:\nContralateral"))
+d <- ggplot(model_7a_ls_mod, aes(y = Estimate, x = spikegroup)) +
+  geom_pointrange(aes(ymin = lower, ymax = upper), 
+                  position=position_dodge(0.5), 
+                  linetype='solid',
+                  fatten = 7) +
+  scale_y_continuous(limits=c(30,60), n.breaks = 6)+
+  theme_classic() +
+  labs(y = "Average CBF\n(mL blood / 100 g tissue min)") +
+  theme(axis.text.x = element_text(size = 25, color = "black"), axis.title.x = element_blank(), axis.text.y = element_text(size = 25, color = "black"), axis.title.y = element_text(size = 25, color = "black"), legend.text = element_text(size = 20, color = "black"), legend.title = element_text(, size = 20, color = "black"), legend.position = c(0.8, 0.2) ) +
+  guides(color = guide_legend(override.aes = list(size = 1)), linewidth = "none")
+```
+
+#### Anti-seizure Medication (ASM)
+
+Comparing children on ASM vs off ASM (SeLECTS only), adjusted for age sex sedation
+```{r meds_lmm}
+model_8 <- lmer(CBF ~  meds + ageMRI + sex + sedation + (1 | subj), 
+                data = data_long %>% filter (group == "SeLECTS"))
+model_analysis(model_8)
+
+#get EMM
+model_8_emm <- ls_means(model_8)
+```
+
+
+Supplementary Figure 1
+Comparing by medication type
+```{r meds_figure}
+#creating new df with med types
+data_long_meds <- data_long
+data_long_meds$medType <- "Control"
+data_long_meds$medType[data_long_meds$group == "SeLECTS"] <- "SeLECTS\nno medication"
+data_long_meds$medType[grep("keppra", data_long_meds$medDose)] <- "Levetiracetam"
+data_long_meds$medType[grep("trileptal", data_long_meds$medDose)] <- "Oxcarbazepine"
+data_long_meds$medType[grep("lacosamide", data_long_meds$medDose)] <- "Lacosamide"
+data_long_meds$medType <- factor(data_long_meds$medType, levels = c("Control", "SeLECTS\nno medication", "Oxcarbazepine", "Levetiracetam", "Lacosamide"))
+
+#model with "group" replaced by "medType", adjusted age sex sedation
+model_9 <- lmer(CBF ~  medType + ageMRI + sex + sedation + (1 | subj), data = data_long_meds %>% filter (group == "SeLECTS"))
+summary(model_9)
+
+model_9_ls <- ls_means(model_9)
+model_9_ls_mod <- model_9_ls[(rownames(model_9_ls) %in% c("medTypeSeLECTS\nno medication", "medTypeOxcarbazepine", "medTypeLevetiracetam", "medTypeLacosamide")) , ] 
+model_9_ls_mod$Medication <- c("SeLECTS\nno medication", "Oxcarbazepine", "Levetiracetam", "Lacosamide")
+model_9_ls_mod$Medication <- factor(model_9_ls_mod$Medication, levels = c("SeLECTS\nno medication", "Oxcarbazepine", "Levetiracetam", "Lacosamide"))
+e <- ggplot(model_9_ls_mod, aes(y = Estimate, x = Medication)) +
+  geom_pointrange(aes(ymin = lower, ymax = upper), 
+                  position=position_dodge(0.5), 
+                  linetype='solid',
+                  fatten = 7) +
+  scale_y_continuous(limits=c(30,65), n.breaks = 6)+
+  theme_classic() +
+  labs(y = "Average CBF\n(mL blood / 100 g tissue min)") +
+  theme(axis.text.x = element_text(size = 25, color = "black"), axis.title.x = element_blank(), axis.text.y = element_text(size = 25, color = "black"), axis.title.y = element_text(size = 25, color = "black"), legend.text = element_text(size = 20, color = "black"), legend.title = element_text(, size = 20, color = "black"), legend.position = c(0.8, 0.2) ) +
+  guides(color = guide_legend(override.aes = list(size = 1)), linewidth = "none")
+
+#comparing med types
+model_9_ls_pair <- ls_means(model_9, pairwise = TRUE)
+```
+
